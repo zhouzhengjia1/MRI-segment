@@ -41,6 +41,29 @@ def _slice_2d(volume: np.ndarray, slice_idx: int) -> np.ndarray:
     return np.rot90(volume[:, :, slice_idx])
 
 
+def get_label_region_display_slice(region_masks: np.ndarray) -> int:
+    """Pick a slice that makes WT, TC, and ET regions visible when possible."""
+    if region_masks.ndim != 4 or region_masks.shape[0] != 3:
+        raise ValueError(f"Expected region masks with shape [3, H, W, D], got {region_masks.shape}.")
+
+    depth = region_masks.shape[3]
+    slice_sums = region_masks.reshape(3, -1, depth).sum(axis=1)
+    wt_sums, tc_sums, et_sums = slice_sums
+
+    all_regions = np.where((wt_sums > 0) & (tc_sums > 0) & (et_sums > 0))[0]
+    if all_regions.size:
+        scores = et_sums[all_regions] * 1000 + tc_sums[all_regions] * 10 + wt_sums[all_regions]
+        return int(all_regions[int(np.argmax(scores))])
+
+    if np.any(et_sums > 0):
+        return int(np.argmax(et_sums))
+    if np.any(tc_sums > 0):
+        return int(np.argmax(tc_sums))
+    if np.any(wt_sums > 0):
+        return int(np.argmax(wt_sums))
+    return depth // 2
+
+
 def _robust_window(image: np.ndarray) -> Tuple[float, float]:
     finite = image[np.isfinite(image)]
     if finite.size == 0:
@@ -277,7 +300,7 @@ def visualize_label_regions(
         raise ValueError(f"Expected region masks with shape [3, H, W, D], got {region_masks.shape}.")
 
     if slice_idx is None:
-        slice_idx = get_tumor_slice(region_masks[0])
+        slice_idx = get_label_region_display_slice(region_masks)
 
     colors = {
         "WT": (0.15, 0.70, 1.00),
@@ -307,7 +330,12 @@ def visualize_case_label_regions(
     visualize_label_regions(regions, str(case["case_id"]), save_path=save_path)
 
 
-def plot_contrast_statistics(contrast_df: Any, save_path: Optional[PathLike] = None) -> Any:
+def plot_contrast_statistics(
+    contrast_df: Any,
+    save_path: Optional[PathLike] = None,
+    title: str = "ET vs healthy brain contrast",
+    ylabel: str = "Mean absolute contrast",
+) -> Any:
     """Save a bar plot comparing ET-vs-healthy contrast across modalities."""
     grouped = (
         contrast_df.groupby("modality")["ET_vs_healthy_contrast"]
@@ -318,9 +346,9 @@ def plot_contrast_statistics(contrast_df: Any, save_path: Optional[PathLike] = N
     fig, ax = plt.subplots(figsize=(7.5, 5))
     colors = ["#4C78A8", "#E45756", "#72B7B2", "#F2CF5B"]
     ax.bar(grouped.index, grouped.values, color=colors, edgecolor="black", linewidth=0.8)
-    ax.set_title("ET vs healthy brain contrast")
+    ax.set_title(title)
     ax.set_xlabel("MRI modality")
-    ax.set_ylabel("Mean absolute contrast")
+    ax.set_ylabel(ylabel)
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     _save_or_close(fig, save_path)

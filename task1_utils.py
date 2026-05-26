@@ -17,7 +17,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-
 PathLike = Union[str, Path]
 BBox = Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]
 
@@ -71,7 +70,9 @@ def identify_nifti_role(path: PathLike) -> Optional[str]:
 
 
 def _iter_nifti_files(directory: Path) -> List[Path]:
-    return sorted(path for path in directory.iterdir() if path.is_file() and is_nifti_file(path))
+    return sorted(
+        path for path in directory.iterdir() if path.is_file() and is_nifti_file(path)
+    )
 
 
 def _scan_case_file_map(case_dir: Path) -> Dict[str, Path]:
@@ -91,7 +92,9 @@ def _scan_case_file_map(case_dir: Path) -> Dict[str, Path]:
 
 def _contains_segmentation_file(case_dir: Path) -> bool:
     try:
-        return any(identify_nifti_role(path) == "seg" for path in _iter_nifti_files(case_dir))
+        return any(
+            identify_nifti_role(path) == "seg" for path in _iter_nifti_files(case_dir)
+        )
     except ValueError:
         return True
 
@@ -113,7 +116,9 @@ def find_patient_cases(dataset_dir: PathLike) -> List[Path]:
         return [root]
 
     direct_cases = sorted(
-        path for path in root.iterdir() if path.is_dir() and _contains_segmentation_file(path)
+        path
+        for path in root.iterdir()
+        if path.is_dir() and _contains_segmentation_file(path)
     )
     if direct_cases:
         return direct_cases
@@ -198,7 +203,10 @@ def load_case(case_dir: PathLike) -> Dict[str, Any]:
     required = list(MODALITY_ORDER) + ["seg"]
     missing = [name for name in required if name not in file_map]
     if missing:
-        found = ", ".join(sorted(path.name for path in _iter_nifti_files(case_path))) or "none"
+        found = (
+            ", ".join(sorted(path.name for path in _iter_nifti_files(case_path)))
+            or "none"
+        )
         raise FileNotFoundError(
             f"Case '{case_path.name}' is missing required files for: {missing}. "
             f"Found NIfTI files: {found}"
@@ -290,13 +298,17 @@ def zscore_normalize(
         valid_mask = volume > 0
     else:
         if mask.shape != volume.shape:
-            raise ValueError(f"Mask shape {mask.shape} does not match volume shape {volume.shape}.")
+            raise ValueError(
+                f"Mask shape {mask.shape} does not match volume shape {volume.shape}."
+            )
         valid_mask = mask.astype(bool)
 
     valid_mask = valid_mask & np.isfinite(volume)
 
     if not np.any(valid_mask):
-        warnings.warn("No valid brain voxels found; returning the input volume as float32.")
+        warnings.warn(
+            "No valid brain voxels found; returning the input volume as float32."
+        )
         return volume.astype(np.float32, copy=True), float("nan"), float("nan")
 
     values = volume[valid_mask].astype(np.float64)
@@ -334,7 +346,9 @@ def get_nonzero_bbox(modality_list: Sequence[np.ndarray]) -> BBox:
     """Compute a 3D bounding box from the joint nonzero area of modalities."""
     brain_mask = get_joint_nonzero_mask(modality_list)
     if not np.any(brain_mask):
-        warnings.warn("Joint nonzero mask is empty; using the full image extent as bbox.")
+        warnings.warn(
+            "Joint nonzero mask is empty; using the full image extent as bbox."
+        )
         return tuple((0, int(size)) for size in brain_mask.shape)  # type: ignore[return-value]
 
     coords = np.where(brain_mask)
@@ -376,7 +390,9 @@ def crop_case(case: Dict[str, Any]) -> Dict[str, Any]:
     }
     cropped["seg"] = crop_to_bbox(case["seg"], bbox)
     if "brain_mask" in case and case["brain_mask"] is not None:
-        cropped["brain_mask"] = crop_to_bbox(case["brain_mask"].astype(np.uint8), bbox).astype(bool)
+        cropped["brain_mask"] = crop_to_bbox(
+            case["brain_mask"].astype(np.uint8), bbox
+        ).astype(bool)
 
     cropped["bbox"] = bbox
     cropped["cropped_shape"] = tuple(cropped["seg"].shape)
@@ -391,7 +407,9 @@ def ceil_to_multiple(value: int, multiple: int = 16) -> int:
     return int(((value + multiple - 1) // multiple) * multiple)
 
 
-def _cropped_shape_from_case_or_dir(item: Union[Dict[str, Any], PathLike]) -> Tuple[int, int, int]:
+def _cropped_shape_from_case_or_dir(
+    item: Union[Dict[str, Any], PathLike],
+) -> Tuple[int, int, int]:
     if isinstance(item, dict):
         if item.get("cropped_shape") is not None:
             return tuple(int(x) for x in item["cropped_shape"])  # type: ignore[return-value]
@@ -399,7 +417,9 @@ def _cropped_shape_from_case_or_dir(item: Union[Dict[str, Any], PathLike]) -> Tu
         bbox = get_nonzero_bbox([modalities[name] for name in MODALITY_ORDER])
     else:
         case = load_case(item)
-        brain_mask = get_joint_nonzero_mask([case["modalities"][name] for name in MODALITY_ORDER])
+        brain_mask = get_joint_nonzero_mask(
+            [case["modalities"][name] for name in MODALITY_ORDER]
+        )
         bbox = get_nonzero_bbox([brain_mask.astype(np.uint8)])
 
     return tuple(int(end - start) for start, end in bbox)  # type: ignore[return-value]
@@ -520,8 +540,14 @@ def _masked_mean(volume: np.ndarray, mask: np.ndarray, label: str) -> float:
     return float(np.asarray(volume)[mask].mean())
 
 
-def compute_contrast_statistics(case: Dict[str, Any]) -> Any:
-    """Compute tumor-vs-healthy intensity statistics for each modality."""
+def compute_contrast_statistics(
+    case: Dict[str, Any], data_stage: str = "processed"
+) -> Any:
+    """Compute tumor-vs-healthy intensity statistics for each modality.
+
+    ``data_stage`` is recorded in the output so raw and processed contrasts can be
+    compared without mixing their intensity scales.
+    """
     try:
         import pandas as pd
     except ImportError as exc:
@@ -537,8 +563,22 @@ def compute_contrast_statistics(case: Dict[str, Any]) -> Any:
 
     if "brain_mask" in case and case["brain_mask"] is not None:
         brain_mask = case["brain_mask"].astype(bool)
+        brain_mask_source = "case_brain_mask"
+        if brain_mask.shape != seg.shape:
+            raise ValueError(
+                f"Brain mask shape {brain_mask.shape} does not match seg shape {seg.shape}."
+            )
     else:
-        brain_mask = get_joint_nonzero_mask([case["modalities"][name] for name in MODALITY_ORDER])
+        if str(data_stage).startswith("processed"):
+            raise ValueError(
+                "Processed contrast requires case['brain_mask']. "
+                "Do not recompute a nonzero mask from z-score volumes because background "
+                "is no longer zero."
+            )
+        brain_mask = get_joint_nonzero_mask(
+            [case["modalities"][name] for name in MODALITY_ORDER]
+        )
+        brain_mask_source = "joint_nonzero_modalities"
 
     healthy_mask = brain_mask & (seg == 0)
     wt_mask = regions[0].astype(bool)
@@ -556,6 +596,8 @@ def compute_contrast_statistics(case: Dict[str, Any]) -> Any:
         rows.append(
             {
                 "case_id": case["case_id"],
+                "data_stage": data_stage,
+                "brain_mask_source": brain_mask_source,
                 "modality": modality_name,
                 "mean_ET": mean_et,
                 "mean_WT": mean_wt,
@@ -606,14 +648,15 @@ def save_processed_2d_slices(
 
     for slice_idx in range(total_slices):
         image = np.stack(
-            [case["modalities"][name][:, :, slice_idx] for name in MODALITY_ORDER], axis=0
+            [case["modalities"][name][:, :, slice_idx] for name in MODALITY_ORDER],
+            axis=0,
         ).astype(np.float32)
         label = regions[:, :, :, slice_idx].astype(np.uint8)
 
         image_padding_values = get_channel_min_padding_values(image)
-        image = pad_2d_to_target(image, target_h, target_w, value=image_padding_values).astype(
-            np.float32
-        )
+        image = pad_2d_to_target(
+            image, target_h, target_w, value=image_padding_values
+        ).astype(np.float32)
         label = pad_2d_to_target(label, target_h, target_w, value=0).astype(np.uint8)
 
         has_tumor = bool(label.sum() > 0)

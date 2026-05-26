@@ -43,6 +43,7 @@ DATASET_DIR = Path("projectdataset/datasets/aiocta/brats2023-part-1/versions/1")
 OUTPUT_DIR = Path("outputs_task1")
 INCLUDE_EMPTY = False
 MAX_CASES = None
+REQUIRED_SEG_LABELS = (1, 2, 4)
 
 
 def check_runtime_dependencies() -> None:
@@ -140,6 +141,12 @@ def _mapping_to_string(mapping: Dict[int, int]) -> str:
     return ";".join(f"{source}->{target}" for source, target in sorted(mapping.items()))
 
 
+def _missing_required_seg_labels(seg: np.ndarray) -> List[int]:
+    """Return required BraTS tumor labels that are absent after label standardization."""
+    present = set(int(value) for value in np.unique(seg))
+    return [label for label in REQUIRED_SEG_LABELS if label not in present]
+
+
 def _case_summary_row(case: Dict[str, Any], slice_info: Dict[str, Any]) -> Dict[str, Any]:
     regions = case["label_regions"]
     row = {
@@ -185,9 +192,7 @@ def process_one_case(
     target_shape: tuple[int, int],
 ) -> Dict[str, Any]:
     """Run Task 1 preprocessing for one case and return summary objects."""
-    prepared = prepare_case_for_task1(case_dir)
-    raw_case = prepared["raw_case"]
-    cropped_case = prepared["processed_case"]
+    raw_case = load_case(case_dir)
     case_id = raw_case["case_id"]
     print(f"[INFO] Loaded {case_id}: shape={raw_case['original_shape']}")
     if raw_case.get("seg_label_mapping"):
@@ -195,6 +200,32 @@ def process_one_case(
             f"[INFO] Standardized labels for {case_id}: "
             f"{_mapping_to_string(raw_case['seg_label_mapping'])}"
         )
+
+    missing_labels = _missing_required_seg_labels(raw_case["seg"])
+    if missing_labels:
+        reason = (
+            "missing required segmentation label(s) after standardization: "
+            + ",".join(str(label) for label in missing_labels)
+        )
+        print(f"[WARN] Skipping {case_id}: {reason}.")
+        return {
+            "skipped": True,
+            "case_id": case_id,
+            "skip_reason": reason,
+            "saved_slices": 0,
+        }
+
+    raw_case_for_contrast = dict(raw_case)
+    raw_case_for_contrast["label_regions"] = transform_labels_to_regions(raw_case["seg"])
+    raw_case_for_contrast["brain_mask"] = get_joint_nonzero_mask(
+        [raw_case["modalities"][name] for name in MODALITY_ORDER]
+    )
+    raw_contrast_df = compute_contrast_statistics(raw_case_for_contrast, data_stage="raw")
+
+    normalized_case = normalize_case_modalities(raw_case)
+    cropped_case = crop_case(normalized_case)
+    cropped_case["label_regions"] = transform_labels_to_regions(cropped_case["seg"])
+
     print(
         f"[INFO] Cropped {case_id}: "
         f"{raw_case['original_shape']} -> {cropped_case['cropped_shape']}"
@@ -213,7 +244,7 @@ def process_one_case(
         )
     )
 
-    contrast_df = compute_contrast_statistics(cropped_case)
+    processed_contrast_df = compute_contrast_statistics(cropped_case, data_stage="processed_zscore")
     slice_info = save_processed_2d_slices(
         cropped_case,
         output_dirs["processed_slices"],
@@ -226,8 +257,10 @@ def process_one_case(
     )
 
     return {
+        "skipped": False,
         "case": cropped_case,
-        "contrast_df": contrast_df,
+        "raw_contrast_df": raw_contrast_df,
+        "processed_contrast_df": processed_contrast_df,
         "summary_row": _case_summary_row(cropped_case, slice_info),
         "saved_slices": int(slice_info["saved_slices"]),
     }
@@ -301,7 +334,6 @@ def generate_representative_visualizations(
             visualize_label_regions(
                 processed_case["label_regions"],
                 case_id,
-                slice_idx=processed_slice_idx,
                 save_path=output_dirs["figures"] / "label_regions_WT_TC_ET.png",
             )
 
@@ -388,7 +420,9 @@ def main(
     print(f"[INFO] Target padded 2D shape: {target_h} x {target_w}")
 
     case_rows: List[Dict[str, Any]] = []
-    contrast_frames = []
+    raw_contrast_frames = []
+    processed_contrast_frames = []
+    skipped_cases: List[Dict[str, str]] = []
     errors: List[Dict[str, str]] = []
     total_saved_slices = 0
     case_id_to_dir = {case_dir.name: case_dir for case_dir in case_dirs}
@@ -401,8 +435,17 @@ def main(
                 include_empty=include_empty,
                 target_shape=target_shape,
             )
+            if result.get("skipped"):
+                skipped_cases.append(
+                    {
+                        "case_id": str(result["case_id"]),
+                        "reason": str(result["skip_reason"]),
+                    }
+                )
+                continue
             case_rows.append(result["summary_row"])
-            contrast_frames.append(result["contrast_df"])
+            raw_contrast_frames.append(result["raw_contrast_df"])
+            processed_contrast_frames.append(result["processed_contrast_df"])
             total_saved_slices += result["saved_slices"]
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
@@ -415,17 +458,24 @@ def main(
         raise RuntimeError("No cases were processed successfully.")
 
     case_summary_df = pd.DataFrame(case_rows)
-    contrast_df = pd.concat(contrast_frames, ignore_index=True)
+    raw_contrast_df = pd.concat(raw_contrast_frames, ignore_index=True)
+    processed_contrast_df = pd.concat(processed_contrast_frames, ignore_index=True)
 
     case_summary_path = output_dirs["summary_csv"] / "case_summary.csv"
     contrast_path = output_dirs["summary_csv"] / "contrast_statistics.csv"
+    raw_contrast_path = output_dirs["summary_csv"] / "raw_contrast_statistics.csv"
     case_summary_df.to_csv(case_summary_path, index=False)
-    contrast_df.to_csv(contrast_path, index=False)
+    processed_contrast_df.to_csv(contrast_path, index=False)
+    raw_contrast_df.to_csv(raw_contrast_path, index=False)
 
     if errors:
         errors_path = output_dirs["summary_csv"] / "processing_errors.csv"
         pd.DataFrame(errors).to_csv(errors_path, index=False)
         print(f"[WARN] {len(errors)} case(s) failed. See: {errors_path}")
+    if skipped_cases:
+        skipped_path = output_dirs["summary_csv"] / "skipped_cases.csv"
+        pd.DataFrame(skipped_cases).to_csv(skipped_path, index=False)
+        print(f"[WARN] {len(skipped_cases)} case(s) skipped for incomplete labels. See: {skipped_path}")
 
     visualization_case_ids = generate_representative_visualizations(
         case_rows,
@@ -435,30 +485,58 @@ def main(
         n=3,
     )
 
+    raw_contrast_plot_path = output_dirs["figures"] / "raw_intensity_contrast_barplot.png"
+    processed_contrast_plot_path = (
+        output_dirs["figures"] / "processed_intensity_contrast_barplot.png"
+    )
     contrast_plot_path = output_dirs["figures"] / "intensity_contrast_barplot.png"
-    plot_contrast_statistics(contrast_df, save_path=contrast_plot_path)
+    plot_contrast_statistics(
+        raw_contrast_df,
+        save_path=raw_contrast_plot_path,
+        title="Raw ET vs healthy brain contrast",
+        ylabel="Mean absolute raw intensity contrast",
+    )
+    plot_contrast_statistics(
+        processed_contrast_df,
+        save_path=processed_contrast_plot_path,
+        title="Processed ET vs healthy brain contrast",
+        ylabel="Mean absolute z-score contrast",
+    )
+    plot_contrast_statistics(
+        processed_contrast_df,
+        save_path=contrast_plot_path,
+        title="Processed ET vs healthy brain contrast",
+        ylabel="Mean absolute z-score contrast",
+    )
 
-    best_modality = _best_et_contrast_modality(contrast_df)
+    best_raw_modality = _best_et_contrast_modality(raw_contrast_df)
+    best_processed_modality = _best_et_contrast_modality(processed_contrast_df)
 
     inspect_random_saved_npz(output_dirs["processed_slices"], target_shape=target_shape)
 
     print("Task 1 finished.")
     print(f"Number of cases processed: {len(case_rows)}")
+    print(f"Number of cases skipped for incomplete labels: {len(skipped_cases)}")
     print(f"Number of 2D slices saved: {total_saved_slices}")
     print(f"Target padded 2D shape: {target_h} x {target_w}")
     print(f"Visualization cases: {', '.join(visualization_case_ids)}")
-    print(f"Best modality for ET contrast: {best_modality}")
+    print(f"Best raw modality for ET contrast: {best_raw_modality}")
+    print(f"Best processed modality for ET contrast: {best_processed_modality}")
     print(f"Outputs saved to: {output_dir}/")
 
     return {
         "cases_processed": len(case_rows),
+        "cases_skipped_incomplete_labels": len(skipped_cases),
         "slices_saved": total_saved_slices,
         "target_h": target_h,
         "target_w": target_w,
         "visualization_cases": visualization_case_ids,
-        "best_modality_for_ET_contrast": best_modality,
+        "best_raw_modality_for_ET_contrast": best_raw_modality,
+        "best_processed_modality_for_ET_contrast": best_processed_modality,
         "case_summary_csv": case_summary_path,
         "contrast_statistics_csv": contrast_path,
+        "raw_contrast_statistics_csv": raw_contrast_path,
+        "skipped_cases": skipped_cases,
         "output_dir": output_dir,
     }
 
