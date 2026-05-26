@@ -273,9 +273,18 @@ def get_tumor_slice(seg: np.ndarray) -> int:
 
 
 def zscore_normalize(
-    volume: np.ndarray, mask: Optional[np.ndarray] = None, eps: float = 1e-8
+    volume: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    eps: float = 1e-8,
+    apply_to_all: bool = True,
 ) -> Tuple[np.ndarray, float, float]:
-    """Z-score normalize a volume inside the brain mask and keep background zero."""
+    """Z-score normalize a volume using brain-mask statistics.
+
+    Mean and standard deviation are computed only inside ``mask`` (or ``volume > 0`` if
+    no mask is provided). By default, the same z-score transform is then applied to the
+    whole volume, including background voxels, so background values can become negative.
+    Set ``apply_to_all=False`` only when old "background stays zero" behavior is needed.
+    """
     volume = np.asarray(volume, dtype=np.float32)
     if mask is None:
         valid_mask = volume > 0
@@ -285,11 +294,10 @@ def zscore_normalize(
         valid_mask = mask.astype(bool)
 
     valid_mask = valid_mask & np.isfinite(volume)
-    normalized = np.zeros_like(volume, dtype=np.float32)
 
     if not np.any(valid_mask):
-        warnings.warn("No valid non-background voxels found; returning an all-zero volume.")
-        return normalized, float("nan"), float("nan")
+        warnings.warn("No valid brain voxels found; returning the input volume as float32.")
+        return volume.astype(np.float32, copy=True), float("nan"), float("nan")
 
     values = volume[valid_mask].astype(np.float64)
     mean = float(values.mean())
@@ -298,7 +306,11 @@ def zscore_normalize(
         warnings.warn(f"Very small standard deviation ({std}); using eps={eps}.")
         std = float(eps)
 
-    normalized[valid_mask] = ((volume[valid_mask] - mean) / std).astype(np.float32)
+    if apply_to_all:
+        normalized = ((volume - mean) / std).astype(np.float32)
+    else:
+        normalized = np.zeros_like(volume, dtype=np.float32)
+        normalized[valid_mask] = ((volume[valid_mask] - mean) / std).astype(np.float32)
     return normalized, mean, std
 
 
@@ -413,14 +425,21 @@ def compute_target_padding_shape(
 
 
 def pad_2d_to_target(
-    arr: np.ndarray, target_h: int, target_w: int, value: Union[int, float] = 0
+    arr: np.ndarray,
+    target_h: int,
+    target_w: int,
+    value: Union[int, float, Sequence[Union[int, float]], np.ndarray] = 0,
 ) -> np.ndarray:
-    """Center-pad a channel-first 2D array [C, H, W] to [C, target_h, target_w]."""
+    """Center-pad a channel-first 2D array [C, H, W] to [C, target_h, target_w].
+
+    ``value`` can be a scalar for all channels or a length-C sequence for per-channel
+    padding values.
+    """
     arr = np.asarray(arr)
     if arr.ndim != 3:
         raise ValueError(f"Expected [C, H, W], got shape {arr.shape}.")
 
-    _, height, width = arr.shape
+    channels, height, width = arr.shape
     if height > target_h or width > target_w:
         raise ValueError(
             f"Cannot pad shape {arr.shape} to target ({target_h}, {target_w}); "
@@ -430,16 +449,39 @@ def pad_2d_to_target(
     pad_h = int(target_h - height)
     pad_w = int(target_w - width)
     top = pad_h // 2
-    bottom = pad_h - top
     left = pad_w // 2
-    right = pad_w - left
 
-    return np.pad(
-        arr,
-        pad_width=((0, 0), (top, bottom), (left, right)),
-        mode="constant",
-        constant_values=value,
-    )
+    values = np.asarray(value)
+    if values.ndim == 0:
+        channel_values = np.full(channels, values.item(), dtype=arr.dtype)
+    else:
+        channel_values = values.reshape(-1)
+        if channel_values.size != channels:
+            raise ValueError(
+                f"Expected {channels} padding values for shape {arr.shape}, "
+                f"got {channel_values.size}."
+            )
+        channel_values = channel_values.astype(arr.dtype, copy=False)
+
+    padded = np.empty((channels, int(target_h), int(target_w)), dtype=arr.dtype)
+    for channel_idx, pad_value in enumerate(channel_values):
+        padded[channel_idx].fill(pad_value)
+    padded[:, top : top + height, left : left + width] = arr
+    return padded
+
+
+def get_channel_min_padding_values(arr: np.ndarray) -> np.ndarray:
+    """Return one finite minimum value per channel for [C, H, W] image padding."""
+    arr = np.asarray(arr)
+    if arr.ndim != 3:
+        raise ValueError(f"Expected [C, H, W], got shape {arr.shape}.")
+
+    pad_values = []
+    for channel_idx in range(arr.shape[0]):
+        channel = arr[channel_idx]
+        finite = channel[np.isfinite(channel)]
+        pad_values.append(float(finite.min()) if finite.size else 0.0)
+    return np.asarray(pad_values, dtype=np.float32)
 
 
 def transform_labels_to_regions(seg: np.ndarray) -> np.ndarray:
@@ -568,7 +610,10 @@ def save_processed_2d_slices(
         ).astype(np.float32)
         label = regions[:, :, :, slice_idx].astype(np.uint8)
 
-        image = pad_2d_to_target(image, target_h, target_w, value=0).astype(np.float32)
+        image_padding_values = get_channel_min_padding_values(image)
+        image = pad_2d_to_target(image, target_h, target_w, value=image_padding_values).astype(
+            np.float32
+        )
         label = pad_2d_to_target(label, target_h, target_w, value=0).astype(np.uint8)
 
         has_tumor = bool(label.sum() > 0)
@@ -589,6 +634,7 @@ def save_processed_2d_slices(
             padded_shape=padded_shape,
             target_h=np.asarray(target_h, dtype=np.int32),
             target_w=np.asarray(target_w, dtype=np.int32),
+            image_padding_values=image_padding_values.astype(np.float32),
             modality_order=np.asarray(MODALITY_ORDER),
             label_order=np.asarray(REGION_ORDER),
         )

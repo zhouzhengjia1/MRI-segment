@@ -15,6 +15,7 @@ import numpy as np
 from task1_utils import (
     MODALITY_ORDER,
     REGION_ORDER,
+    get_channel_min_padding_values,
     get_tumor_slice,
     pad_2d_to_target,
     transform_labels_to_regions,
@@ -223,7 +224,8 @@ def visualize_processed_four_modalities_overlay(
     fig, axes = plt.subplots(4, 2, figsize=(13, 16))
     for row, modality_name in enumerate(MODALITY_ORDER):
         image = case["modalities"][modality_name][:, :, slice_idx][None, :, :].astype(np.float32)
-        image = pad_2d_to_target(image, target_h, target_w, value=0)[0]
+        image_padding_value = get_channel_min_padding_values(image)
+        image = pad_2d_to_target(image, target_h, target_w, value=image_padding_value)[0]
         image = np.rot90(image)
         vmin, vmax = _robust_window(image)
 

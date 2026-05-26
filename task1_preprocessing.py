@@ -68,7 +68,7 @@ def check_runtime_dependencies() -> None:
 
 
 def normalize_case_modalities(case: Dict[str, Any]) -> Dict[str, Any]:
-    """Z-score normalize each modality using its own nonzero brain mask."""
+    """Z-score normalize each modality with joint-brain statistics applied to all voxels."""
     normalized_case = dict(case)
     raw_modalities = case["modalities"]
     normalized_modalities = {}
@@ -76,9 +76,20 @@ def normalize_case_modalities(case: Dict[str, Any]) -> Dict[str, Any]:
 
     brain_mask = get_joint_nonzero_mask([raw_modalities[name] for name in MODALITY_ORDER])
     for modality_name in MODALITY_ORDER:
-        normalized, mean, std = zscore_normalize(raw_modalities[modality_name])
+        normalized, mean, std = zscore_normalize(
+            raw_modalities[modality_name],
+            mask=brain_mask,
+            apply_to_all=True,
+        )
         normalized_modalities[modality_name] = normalized
-        normalization_stats[modality_name] = {"mean": mean, "std": std}
+        bg_zscore = float("nan")
+        if np.isfinite(mean) and np.isfinite(std) and std != 0:
+            bg_zscore = float((0.0 - mean) / std)
+        normalization_stats[modality_name] = {
+            "mean": mean,
+            "std": std,
+            "background_value_after_zscore": bg_zscore,
+        }
 
     normalized_case["modalities"] = normalized_modalities
     normalized_case["normalization"] = normalization_stats
@@ -131,7 +142,7 @@ def _mapping_to_string(mapping: Dict[int, int]) -> str:
 
 def _case_summary_row(case: Dict[str, Any], slice_info: Dict[str, Any]) -> Dict[str, Any]:
     regions = case["label_regions"]
-    return {
+    row = {
         "case_id": case["case_id"],
         "original_shape": shape_to_string(case["original_shape"]),
         "cropped_shape": shape_to_string(case["cropped_shape"]),
@@ -148,6 +159,11 @@ def _case_summary_row(case: Dict[str, Any], slice_info: Dict[str, Any]) -> Dict[
         "TC_voxels": int(regions[1].sum()),
         "ET_voxels": int(regions[2].sum()),
     }
+    normalization = case.get("normalization", {})
+    for modality_name in MODALITY_ORDER:
+        bg_value = normalization.get(modality_name, {}).get("background_value_after_zscore", "")
+        row[f"{modality_name}_bg_zscore"] = bg_value
+    return row
 
 
 def _best_et_contrast_modality(contrast_df: Any) -> str:
@@ -182,6 +198,19 @@ def process_one_case(
     print(
         f"[INFO] Cropped {case_id}: "
         f"{raw_case['original_shape']} -> {cropped_case['cropped_shape']}"
+    )
+    bg_values = [
+        cropped_case.get("normalization", {})
+        .get(modality_name, {})
+        .get("background_value_after_zscore", float("nan"))
+        for modality_name in MODALITY_ORDER
+    ]
+    print(
+        "[INFO] Background z-score values "
+        + ", ".join(
+            f"{modality_name}={bg_value:.4f}" if np.isfinite(bg_value) else f"{modality_name}=nan"
+            for modality_name, bg_value in zip(MODALITY_ORDER, bg_values)
+        )
     )
 
     contrast_df = compute_contrast_statistics(cropped_case)
@@ -291,6 +320,13 @@ def inspect_random_saved_npz(processed_dir: Path, target_shape: tuple[int, int])
         image = sample["image"]
         label = sample["label"]
         label_sums = [int(label[channel].sum()) for channel in range(label.shape[0])]
+        image_channel_mins = [float(np.nanmin(image[channel])) for channel in range(image.shape[0])]
+        label_unique = np.unique(label)
+        image_padding_values = (
+            sample["image_padding_values"].astype(np.float32)
+            if "image_padding_values" in sample.files
+            else np.asarray(image_channel_mins, dtype=np.float32)
+        )
 
     expected_image_shape = (4, int(target_shape[0]), int(target_shape[1]))
     expected_label_shape = (3, int(target_shape[0]), int(target_shape[1]))
@@ -300,10 +336,18 @@ def inspect_random_saved_npz(processed_dir: Path, target_shape: tuple[int, int])
             f"image {image.shape}, label {label.shape}, "
             f"expected {expected_image_shape} and {expected_label_shape}."
         )
+    if not set(label_unique.tolist()).issubset({0, 1}):
+        raise ValueError(f"Saved label should be binary 0/1, got values {label_unique.tolist()}.")
 
     print(f"Random npz check: {sample_path}")
     print(f"image shape: {image.shape}")
     print(f"label shape: {label.shape}")
+    print(f"image channel min values: {[round(value, 4) for value in image_channel_mins]}")
+    print(
+        "image padding values: "
+        f"{[round(float(value), 4) for value in image_padding_values.tolist()]}"
+    )
+    print(f"label unique values: {label_unique.tolist()}")
     print(f"label voxel sums WT/TC/ET: {label_sums}")
 
 
