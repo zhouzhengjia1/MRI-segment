@@ -36,8 +36,8 @@ from task1_visualization import (
     visualize_processed_four_modalities_overlay,
     visualize_label_regions,
     visualize_raw_four_modalities_overlay,
+    visualize_top_t1ce_et_contrast_cases,
 )
-
 
 DATASET_DIR = Path("projectdataset/datasets/aiocta/brats2023-part-1/versions/1")
 OUTPUT_DIR = Path("outputs_task1")
@@ -75,7 +75,9 @@ def normalize_case_modalities(case: Dict[str, Any]) -> Dict[str, Any]:
     normalized_modalities = {}
     normalization_stats = {}
 
-    brain_mask = get_joint_nonzero_mask([raw_modalities[name] for name in MODALITY_ORDER])
+    brain_mask = get_joint_nonzero_mask(
+        [raw_modalities[name] for name in MODALITY_ORDER]
+    )
     for modality_name in MODALITY_ORDER:
         normalized, mean, std = zscore_normalize(
             raw_modalities[modality_name],
@@ -147,7 +149,9 @@ def _missing_required_seg_labels(seg: np.ndarray) -> List[int]:
     return [label for label in REQUIRED_SEG_LABELS if label not in present]
 
 
-def _case_summary_row(case: Dict[str, Any], slice_info: Dict[str, Any]) -> Dict[str, Any]:
+def _case_summary_row(
+    case: Dict[str, Any], slice_info: Dict[str, Any]
+) -> Dict[str, Any]:
     regions = case["label_regions"]
     row = {
         "case_id": case["case_id"],
@@ -157,7 +161,9 @@ def _case_summary_row(case: Dict[str, Any], slice_info: Dict[str, Any]) -> Dict[
         "target_h": int(slice_info["target_h"]),
         "target_w": int(slice_info["target_w"]),
         "bbox": bbox_to_string(case.get("bbox")),
-        "seg_original_labels": ",".join(str(x) for x in case.get("seg_original_labels", [])),
+        "seg_original_labels": ",".join(
+            str(x) for x in case.get("seg_original_labels", [])
+        ),
         "seg_label_mapping": _mapping_to_string(case.get("seg_label_mapping", {})),
         "number_of_total_slices": int(case["cropped_shape"][2]),
         "number_of_tumor_slices": int(slice_info["tumor_slices"]),
@@ -168,16 +174,21 @@ def _case_summary_row(case: Dict[str, Any], slice_info: Dict[str, Any]) -> Dict[
     }
     normalization = case.get("normalization", {})
     for modality_name in MODALITY_ORDER:
-        bg_value = normalization.get(modality_name, {}).get("background_value_after_zscore", "")
+        bg_value = normalization.get(modality_name, {}).get(
+            "background_value_after_zscore", ""
+        )
         row[f"{modality_name}_bg_zscore"] = bg_value
     return row
 
 
-def _best_et_contrast_modality(contrast_df: Any) -> str:
+def _best_et_contrast_modality(
+    contrast_df: Any,
+    value_column: str = "ET_vs_healthy_contrast",
+) -> str:
+    if value_column not in contrast_df.columns:
+        return "N/A"
     grouped = (
-        contrast_df.groupby("modality")["ET_vs_healthy_contrast"]
-        .mean()
-        .reindex(MODALITY_ORDER)
+        contrast_df.groupby("modality")[value_column].mean().reindex(MODALITY_ORDER)
     )
     valid = grouped.dropna()
     if valid.empty:
@@ -216,11 +227,15 @@ def process_one_case(
         }
 
     raw_case_for_contrast = dict(raw_case)
-    raw_case_for_contrast["label_regions"] = transform_labels_to_regions(raw_case["seg"])
+    raw_case_for_contrast["label_regions"] = transform_labels_to_regions(
+        raw_case["seg"]
+    )
     raw_case_for_contrast["brain_mask"] = get_joint_nonzero_mask(
         [raw_case["modalities"][name] for name in MODALITY_ORDER]
     )
-    raw_contrast_df = compute_contrast_statistics(raw_case_for_contrast, data_stage="raw")
+    raw_contrast_df = compute_contrast_statistics(
+        raw_case_for_contrast, data_stage="raw"
+    )
 
     normalized_case = normalize_case_modalities(raw_case)
     cropped_case = crop_case(normalized_case)
@@ -239,12 +254,18 @@ def process_one_case(
     print(
         "[INFO] Background z-score values "
         + ", ".join(
-            f"{modality_name}={bg_value:.4f}" if np.isfinite(bg_value) else f"{modality_name}=nan"
+            (
+                f"{modality_name}={bg_value:.4f}"
+                if np.isfinite(bg_value)
+                else f"{modality_name}=nan"
+            )
             for modality_name, bg_value in zip(MODALITY_ORDER, bg_values)
         )
     )
 
-    processed_contrast_df = compute_contrast_statistics(cropped_case, data_stage="processed_zscore")
+    processed_contrast_df = compute_contrast_statistics(
+        cropped_case, data_stage="processed_zscore"
+    )
     slice_info = save_processed_2d_slices(
         cropped_case,
         output_dirs["processed_slices"],
@@ -266,14 +287,18 @@ def process_one_case(
     }
 
 
-def select_representative_case_ids(case_rows: List[Dict[str, Any]], n: int = 3) -> List[str]:
+def select_representative_case_ids(
+    case_rows: List[Dict[str, Any]], n: int = 3
+) -> List[str]:
     """Select representative cases by low/median/high WT tumor burden."""
     if not case_rows:
         return []
     if len(case_rows) <= n:
         return [str(row["case_id"]) for row in case_rows]
 
-    sorted_rows = sorted(case_rows, key=lambda row: (int(row["WT_voxels"]), str(row["case_id"])))
+    sorted_rows = sorted(
+        case_rows, key=lambda row: (int(row["WT_voxels"]), str(row["case_id"]))
+    )
     positions = [round(i * (len(sorted_rows) - 1) / (n - 1)) for i in range(n)]
 
     selected = []
@@ -284,7 +309,9 @@ def select_representative_case_ids(case_rows: List[Dict[str, Any]], n: int = 3) 
     return selected
 
 
-def _processed_slice_from_raw_slice(processed_case: Dict[str, Any], raw_slice_idx: int) -> int:
+def _processed_slice_from_raw_slice(
+    processed_case: Dict[str, Any], raw_slice_idx: int
+) -> int:
     bbox = processed_case.get("bbox")
     if bbox is None:
         return get_tumor_slice(processed_case["seg"])
@@ -311,7 +338,9 @@ def generate_representative_visualizations(
         processed_case = prepared["processed_case"]
 
         raw_slice_idx = get_tumor_slice(raw_case["seg"])
-        processed_slice_idx = _processed_slice_from_raw_slice(processed_case, raw_slice_idx)
+        processed_slice_idx = _processed_slice_from_raw_slice(
+            processed_case, raw_slice_idx
+        )
         case_label = f"case {index:03d}"
 
         visualize_raw_four_modalities_overlay(
@@ -340,7 +369,53 @@ def generate_representative_visualizations(
     return selected_ids
 
 
-def inspect_random_saved_npz(processed_dir: Path, target_shape: tuple[int, int]) -> None:
+def generate_top_t1ce_et_contrast_visualization(
+    raw_contrast_df: Any,
+    case_id_to_dir: Dict[str, Path],
+    output_dirs: Dict[str, Path],
+    top_n: int = 5,
+) -> List[str]:
+    """Save a compact figure of raw T1ce cases with largest ET contrast."""
+    contrast_column = "ET_vs_healthy_abs_contrast"
+    if contrast_column not in raw_contrast_df.columns:
+        contrast_column = "ET_vs_healthy_contrast"
+    t1ce_rows = raw_contrast_df[
+        raw_contrast_df["modality"].astype(str).str.lower() == "t1ce"
+    ].copy()
+    t1ce_rows = t1ce_rows.dropna(subset=[contrast_column])
+    t1ce_rows = t1ce_rows.sort_values(contrast_column, ascending=False).head(top_n)
+
+    examples = []
+    for rank, (_, row) in enumerate(t1ce_rows.iterrows(), start=1):
+        case_id = str(row["case_id"])
+        case_dir = case_id_to_dir.get(case_id)
+        if case_dir is None:
+            continue
+        raw_case = load_case(case_dir)
+        et_areas = np.sum(raw_case["seg"] == 4, axis=(0, 1))
+        if et_areas.size == 0 or int(et_areas.max()) == 0:
+            continue
+        examples.append(
+            {
+                "rank": rank,
+                "case": raw_case,
+                "contrast": float(row[contrast_column]),
+                "slice_idx": int(np.argmax(et_areas)),
+            }
+        )
+
+    if examples:
+        visualize_top_t1ce_et_contrast_cases(
+            examples,
+            save_path=output_dirs["figures"] / "top5_t1ce_et_contrast_examples.png",
+        )
+
+    return [str(example["case"]["case_id"]) for example in examples]
+
+
+def inspect_random_saved_npz(
+    processed_dir: Path, target_shape: tuple[int, int]
+) -> None:
     """Print shape and label sanity checks for one saved .npz slice."""
     npz_files = sorted(processed_dir.rglob("*.npz"))
     if not npz_files:
@@ -352,7 +427,9 @@ def inspect_random_saved_npz(processed_dir: Path, target_shape: tuple[int, int])
         image = sample["image"]
         label = sample["label"]
         label_sums = [int(label[channel].sum()) for channel in range(label.shape[0])]
-        image_channel_mins = [float(np.nanmin(image[channel])) for channel in range(image.shape[0])]
+        image_channel_mins = [
+            float(np.nanmin(image[channel])) for channel in range(image.shape[0])
+        ]
         label_unique = np.unique(label)
         image_padding_values = (
             sample["image_padding_values"].astype(np.float32)
@@ -362,19 +439,26 @@ def inspect_random_saved_npz(processed_dir: Path, target_shape: tuple[int, int])
 
     expected_image_shape = (4, int(target_shape[0]), int(target_shape[1]))
     expected_label_shape = (3, int(target_shape[0]), int(target_shape[1]))
-    if tuple(image.shape) != expected_image_shape or tuple(label.shape) != expected_label_shape:
+    if (
+        tuple(image.shape) != expected_image_shape
+        or tuple(label.shape) != expected_label_shape
+    ):
         raise ValueError(
             f"Saved npz shape mismatch in {sample_path}: "
             f"image {image.shape}, label {label.shape}, "
             f"expected {expected_image_shape} and {expected_label_shape}."
         )
     if not set(label_unique.tolist()).issubset({0, 1}):
-        raise ValueError(f"Saved label should be binary 0/1, got values {label_unique.tolist()}.")
+        raise ValueError(
+            f"Saved label should be binary 0/1, got values {label_unique.tolist()}."
+        )
 
     print(f"Random npz check: {sample_path}")
     print(f"image shape: {image.shape}")
     print(f"label shape: {label.shape}")
-    print(f"image channel min values: {[round(value, 4) for value in image_channel_mins]}")
+    print(
+        f"image channel min values: {[round(value, 4) for value in image_channel_mins]}"
+    )
     print(
         "image padding values: "
         f"{[round(float(value), 4) for value in image_padding_values.tolist()]}"
@@ -475,7 +559,9 @@ def main(
     if skipped_cases:
         skipped_path = output_dirs["summary_csv"] / "skipped_cases.csv"
         pd.DataFrame(skipped_cases).to_csv(skipped_path, index=False)
-        print(f"[WARN] {len(skipped_cases)} case(s) skipped for incomplete labels. See: {skipped_path}")
+        print(
+            f"[WARN] {len(skipped_cases)} case(s) skipped for incomplete labels. See: {skipped_path}"
+        )
 
     visualization_case_ids = generate_representative_visualizations(
         case_rows,
@@ -485,7 +571,9 @@ def main(
         n=3,
     )
 
-    raw_contrast_plot_path = output_dirs["figures"] / "raw_intensity_contrast_barplot.png"
+    raw_contrast_plot_path = (
+        output_dirs["figures"] / "raw_intensity_contrast_barplot.png"
+    )
     processed_contrast_plot_path = (
         output_dirs["figures"] / "processed_intensity_contrast_barplot.png"
     )
@@ -493,24 +581,39 @@ def main(
     plot_contrast_statistics(
         raw_contrast_df,
         save_path=raw_contrast_plot_path,
-        title="Raw ET vs healthy brain contrast",
-        ylabel="Mean absolute raw intensity contrast",
+        title="Raw ET vs healthy brain absolute contrast",
+        ylabel="Mean |ET - healthy|",
+        value_column="ET_vs_healthy_abs_contrast",
     )
     plot_contrast_statistics(
         processed_contrast_df,
         save_path=processed_contrast_plot_path,
-        title="Processed ET vs healthy brain contrast",
-        ylabel="Mean absolute z-score contrast",
+        title="Processed ET vs healthy brain relative contrast",
+        ylabel="Mean |ET - healthy| / |healthy|",
+        value_column="ET_vs_healthy_relative_contrast",
     )
     plot_contrast_statistics(
-        processed_contrast_df,
+        raw_contrast_df,
         save_path=contrast_plot_path,
-        title="Processed ET vs healthy brain contrast",
-        ylabel="Mean absolute z-score contrast",
+        title="Raw ET vs healthy brain absolute contrast",
+        ylabel="Mean |ET - healthy|",
+        value_column="ET_vs_healthy_abs_contrast",
+    )
+    top_t1ce_case_ids = generate_top_t1ce_et_contrast_visualization(
+        raw_contrast_df,
+        case_id_to_dir,
+        output_dirs,
+        top_n=5,
     )
 
-    best_raw_modality = _best_et_contrast_modality(raw_contrast_df)
-    best_processed_modality = _best_et_contrast_modality(processed_contrast_df)
+    best_raw_modality = _best_et_contrast_modality(
+        raw_contrast_df,
+        value_column="ET_vs_healthy_abs_contrast",
+    )
+    best_processed_modality = _best_et_contrast_modality(
+        processed_contrast_df,
+        value_column="ET_vs_healthy_relative_contrast",
+    )
 
     inspect_random_saved_npz(output_dirs["processed_slices"], target_shape=target_shape)
 
@@ -520,8 +623,11 @@ def main(
     print(f"Number of 2D slices saved: {total_saved_slices}")
     print(f"Target padded 2D shape: {target_h} x {target_w}")
     print(f"Visualization cases: {', '.join(visualization_case_ids)}")
-    print(f"Best raw modality for ET contrast: {best_raw_modality}")
-    print(f"Best processed modality for ET contrast: {best_processed_modality}")
+    print(f"Top T1ce ET contrast cases: {', '.join(top_t1ce_case_ids) or 'N/A'}")
+    print(f"Best raw modality for ET absolute contrast: {best_raw_modality}")
+    print(
+        f"Best processed modality for ET relative contrast: {best_processed_modality}"
+    )
     print(f"Outputs saved to: {output_dir}/")
 
     return {
@@ -531,8 +637,9 @@ def main(
         "target_h": target_h,
         "target_w": target_w,
         "visualization_cases": visualization_case_ids,
-        "best_raw_modality_for_ET_contrast": best_raw_modality,
-        "best_processed_modality_for_ET_contrast": best_processed_modality,
+        "top_t1ce_et_contrast_cases": top_t1ce_case_ids,
+        "best_raw_modality_for_ET_absolute_contrast": best_raw_modality,
+        "best_processed_modality_for_ET_relative_contrast": best_processed_modality,
         "case_summary_csv": case_summary_path,
         "contrast_statistics_csv": contrast_path,
         "raw_contrast_statistics_csv": raw_contrast_path,
@@ -543,7 +650,9 @@ def main(
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the Task 1 pipeline."""
-    parser = argparse.ArgumentParser(description="BraTS-GLI Task 1 preprocessing pipeline")
+    parser = argparse.ArgumentParser(
+        description="BraTS-GLI Task 1 preprocessing pipeline"
+    )
     parser.add_argument("--dataset_dir", type=Path, default=DATASET_DIR)
     parser.add_argument("--output_dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument(
@@ -552,8 +661,14 @@ def parse_args() -> argparse.Namespace:
         default=INCLUDE_EMPTY,
         help="Save all slices, including empty labels.",
     )
-    parser.add_argument("--max_cases", type=int, default=MAX_CASES, help="Optional debug limit.")
-    parser.add_argument("--stop_on_error", action="store_true", help="Stop immediately when one case fails.")
+    parser.add_argument(
+        "--max_cases", type=int, default=MAX_CASES, help="Optional debug limit."
+    )
+    parser.add_argument(
+        "--stop_on_error",
+        action="store_true",
+        help="Stop immediately when one case fails.",
+    )
     return parser.parse_args()
 
 

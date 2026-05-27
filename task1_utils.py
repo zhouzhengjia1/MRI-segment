@@ -540,13 +540,33 @@ def _masked_mean(volume: np.ndarray, mask: np.ndarray, label: str) -> float:
     return float(np.asarray(volume)[mask].mean())
 
 
+def _relative_contrast(
+    tumor_mean: float,
+    healthy_mean: float,
+    eps: float,
+    label: str,
+) -> float:
+    """Return |tumor - healthy| / |healthy| with a warning for tiny denominators."""
+    if not np.isfinite(tumor_mean) or not np.isfinite(healthy_mean):
+        return float("nan")
+    denominator = abs(float(healthy_mean))
+    if denominator < eps:
+        warnings.warn(
+            f"Healthy mean is too close to zero for relative contrast in {label}; "
+            "returning NaN."
+        )
+        return float("nan")
+    return float(abs(tumor_mean - healthy_mean) / denominator)
+
+
 def compute_contrast_statistics(
-    case: Dict[str, Any], data_stage: str = "processed"
+    case: Dict[str, Any], data_stage: str = "processed", eps: float = 1e-6
 ) -> Any:
     """Compute tumor-vs-healthy intensity statistics for each modality.
 
     ``data_stage`` is recorded in the output so raw and processed contrasts can be
-    compared without mixing their intensity scales.
+    compared without mixing their intensity scales. Relative contrast is defined as
+    ``abs(mean_region - mean_healthy) / abs(mean_healthy)``.
     """
     try:
         import pandas as pd
@@ -592,6 +612,20 @@ def compute_contrast_statistics(
         mean_healthy = _masked_mean(
             volume, healthy_mask, f"{case['case_id']} {modality_name} healthy brain"
         )
+        et_abs_contrast = abs(mean_et - mean_healthy)
+        wt_abs_contrast = abs(mean_wt - mean_healthy)
+        et_relative_contrast = _relative_contrast(
+            mean_et,
+            mean_healthy,
+            eps,
+            f"{case['case_id']} {modality_name} ET",
+        )
+        wt_relative_contrast = _relative_contrast(
+            mean_wt,
+            mean_healthy,
+            eps,
+            f"{case['case_id']} {modality_name} WT",
+        )
 
         rows.append(
             {
@@ -602,8 +636,13 @@ def compute_contrast_statistics(
                 "mean_ET": mean_et,
                 "mean_WT": mean_wt,
                 "mean_healthy": mean_healthy,
-                "ET_vs_healthy_contrast": abs(mean_et - mean_healthy),
-                "WT_vs_healthy_contrast": abs(mean_wt - mean_healthy),
+                "ET_vs_healthy_abs_contrast": et_abs_contrast,
+                "WT_vs_healthy_abs_contrast": wt_abs_contrast,
+                "ET_vs_healthy_relative_contrast": et_relative_contrast,
+                "WT_vs_healthy_relative_contrast": wt_relative_contrast,
+                "ET_vs_healthy_contrast": et_relative_contrast,
+                "WT_vs_healthy_contrast": wt_relative_contrast,
+                "contrast_definition": "abs(mean_region - mean_healthy) / abs(mean_healthy)",
                 "ET_voxels": int(et_mask.sum()),
                 "WT_voxels": int(wt_mask.sum()),
                 "healthy_voxels": int(healthy_mask.sum()),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import matplotlib
 
@@ -330,15 +330,87 @@ def visualize_case_label_regions(
     visualize_label_regions(regions, str(case["case_id"]), save_path=save_path)
 
 
+def _get_et_display_slice(seg: np.ndarray) -> int:
+    """Return the slice with largest ET area, falling back to tumor-max slice."""
+    if seg.ndim != 3:
+        raise ValueError(f"Expected seg shape [H, W, D], got {seg.shape}.")
+    et_areas = np.sum(seg == 4, axis=(0, 1))
+    if et_areas.size and int(et_areas.max()) > 0:
+        return int(np.argmax(et_areas))
+    return get_tumor_slice(seg)
+
+
+def visualize_top_t1ce_et_contrast_cases(
+    examples: Sequence[Dict[str, Any]],
+    save_path: Optional[PathLike] = None,
+) -> None:
+    """Save top raw T1ce cases ranked by ET-vs-healthy contrast."""
+    if not examples:
+        return
+
+    n_examples = len(examples)
+    fig, axes = plt.subplots(n_examples, 2, figsize=(10, 4.2 * n_examples))
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[None, :]
+
+    for row_idx, example in enumerate(examples):
+        case = example["case"]
+        case_id = str(case["case_id"])
+        contrast = float(example["contrast"])
+        rank = int(example.get("rank", row_idx + 1))
+        slice_idx = int(example.get("slice_idx", _get_et_display_slice(case["seg"])))
+
+        image = _slice_2d(case["modalities"]["T1ce"], slice_idx)
+        seg_slice = _slice_2d(case["seg"], slice_idx)
+        et_slice = (seg_slice == 4).astype(np.uint8)
+        vmin, vmax = _robust_window(image)
+
+        plain_artist = axes[row_idx, 0].imshow(image, cmap="gray", vmin=vmin, vmax=vmax)
+        _add_intensity_colorbar(fig, axes[row_idx, 0], plain_artist)
+        axes[row_idx, 0].set_title(
+            f"#{rank} {case_id}\nraw T1ce | ET slice {slice_idx} | absolute contrast={contrast:.2f}",
+            fontsize=9,
+            pad=8,
+        )
+        axes[row_idx, 0].axis("off")
+
+        overlay_artist = axes[row_idx, 1].imshow(image, cmap="gray", vmin=vmin, vmax=vmax)
+        axes[row_idx, 1].imshow(_mask_rgba(et_slice, (1.00, 0.10, 0.12), alpha=0.42))
+        _add_intensity_colorbar(fig, axes[row_idx, 1], overlay_artist)
+        axes[row_idx, 1].set_title(
+            f"#{rank} {case_id}\nraw T1ce + ET overlay | label 4",
+            fontsize=9,
+            pad=8,
+        )
+        axes[row_idx, 1].axis("off")
+
+    fig.suptitle("Top 5 raw T1ce cases by ET absolute contrast", y=0.995, fontsize=12)
+    fig.text(
+        0.5,
+        0.01,
+        "Ranking uses raw T1ce |mean_ET - mean_healthy|. "
+        "Red overlay shows ET label 4.",
+        ha="center",
+        fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0.025, 1, 0.985), h_pad=1.7, w_pad=0.8)
+    _save_or_close(fig, save_path)
+
+
 def plot_contrast_statistics(
     contrast_df: Any,
     save_path: Optional[PathLike] = None,
     title: str = "ET vs healthy brain contrast",
     ylabel: str = "Mean absolute contrast",
+    value_column: str = "ET_vs_healthy_contrast",
 ) -> Any:
     """Save a bar plot comparing ET-vs-healthy contrast across modalities."""
+    if value_column not in contrast_df.columns:
+        raise ValueError(f"Column '{value_column}' not found in contrast DataFrame.")
+
     grouped = (
-        contrast_df.groupby("modality")["ET_vs_healthy_contrast"]
+        contrast_df.groupby("modality")[value_column]
         .mean()
         .reindex(MODALITY_ORDER)
     )
