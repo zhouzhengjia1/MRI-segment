@@ -583,11 +583,73 @@ def normalize_mri_for_display_with_background(img, eps=1e-6):
     return np.clip(out, 0.0, 1.0)
 
 
-def estimate_contrast_score(image_np, gt_union, image_channel=3, eps=1e-6):
+def get_center_display_channel(
+    image_np,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
+):
+    if num_modalities <= 0:
+        raise ValueError(f"num_modalities must be positive, got {num_modalities}")
+
+    if slice_window <= 0 or slice_window % 2 != 1:
+        raise ValueError(f"slice_window must be a positive odd integer, got {slice_window}")
+
+    if modality_index < 0 or modality_index >= num_modalities:
+        raise ValueError(
+            f"modality_index must be in [0, {num_modalities - 1}], got {modality_index}"
+        )
+
+    num_channels = int(image_np.shape[0])
+    channel = (slice_window // 2) * num_modalities + modality_index
+
+    if channel >= num_channels:
+        raise ValueError(
+            f"Cannot display channel {channel}: image has only {num_channels} channels. "
+            f"Check num_modalities={num_modalities}, slice_window={slice_window}, "
+            f"and modality_index={modality_index}."
+        )
+
+    return channel
+
+
+def resolve_display_channel(
+    image_np,
+    image_channel=None,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
+):
+    if image_channel is not None:
+        return min(max(int(image_channel), 0), int(image_np.shape[0]) - 1)
+
+    return get_center_display_channel(
+        image_np=image_np,
+        num_modalities=num_modalities,
+        slice_window=slice_window,
+        modality_index=modality_index,
+    )
+
+
+def estimate_contrast_score(
+    image_np,
+    gt_union,
+    image_channel=None,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
+    eps=1e-6,
+):
     if gt_union.sum() == 0:
         return np.nan
 
-    channel = min(image_channel, image_np.shape[0] - 1)
+    channel = resolve_display_channel(
+        image_np=image_np,
+        image_channel=image_channel,
+        num_modalities=num_modalities,
+        slice_window=slice_window,
+        modality_index=modality_index,
+    )
     img = image_np[channel].astype(np.float32)
     background_value = estimate_background_value_from_corners(img)
     brain_mask = np.abs(img - background_value) > eps
@@ -633,7 +695,15 @@ def build_improvement_suggestion(reasons):
     return "; ".join(dict.fromkeys(suggestions))
 
 
-def analyze_failure_case(image_np, label_np, pred_np, image_channel=3):
+def analyze_failure_case(
+    image_np,
+    label_np,
+    pred_np,
+    image_channel=None,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
+):
     gt_union = np.any(label_np > 0, axis=0)
     pred_union = np.any(pred_np > 0, axis=0)
 
@@ -657,7 +727,12 @@ def analyze_failure_case(image_np, label_np, pred_np, image_channel=3):
         reasons.append("small lesion size")
 
     contrast_score = estimate_contrast_score(
-        image_np, gt_union, image_channel=image_channel
+        image_np,
+        gt_union,
+        image_channel=image_channel,
+        num_modalities=num_modalities,
+        slice_window=slice_window,
+        modality_index=modality_index,
     )
     if np.isnan(contrast_score):
         if gt_area > 0:
@@ -728,8 +803,24 @@ def sanitize_filename(value):
     return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(value))
 
 
-def visualize_worst_case(image_np, label_np, pred_np, row, save_path, image_channel=3):
-    channel = min(image_channel, image_np.shape[0] - 1)
+def visualize_worst_case(
+    image_np,
+    label_np,
+    pred_np,
+    row,
+    save_path,
+    image_channel=None,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
+):
+    channel = resolve_display_channel(
+        image_np=image_np,
+        image_channel=image_channel,
+        num_modalities=num_modalities,
+        slice_window=slice_window,
+        modality_index=modality_index,
+    )
     bg_display = normalize_mri_for_display_with_background(image_np[channel])
 
     gt_union = np.any(label_np > 0, axis=0)
@@ -788,6 +879,9 @@ def enrich_and_save_worst5(
     output_dir,
     threshold=0.5,
     top_k=5,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
 ):
     output_dir = Path(output_dir)
     worst5_cases_path = output_dir / "worst5_cases.csv"
@@ -808,7 +902,12 @@ def enrich_and_save_worst5(
         )
 
         analysis = analyze_failure_case(
-            image_np=image_np, label_np=label_np, pred_np=pred_np
+            image_np=image_np,
+            label_np=label_np,
+            pred_np=pred_np,
+            num_modalities=num_modalities,
+            slice_window=slice_window,
+            modality_index=modality_index,
         )
         enriched = dict(row)
         enriched.update(analysis)
@@ -825,7 +924,9 @@ def enrich_and_save_worst5(
             pred_np=pred_np,
             row=enriched,
             save_path=worst5_vis_dir / filename,
-            image_channel=3,
+            num_modalities=num_modalities,
+            slice_window=slice_window,
+            modality_index=modality_index,
         )
 
     worst_fieldnames = [
@@ -860,6 +961,9 @@ def run_test_evaluation(
     region_names,
     threshold=0.5,
     save_worst5=True,
+    num_modalities=4,
+    slice_window=1,
+    modality_index=3,
 ):
     """Load the best checkpoint, evaluate test data, and optionally save worst-5 analysis."""
     output_dir = Path(output_dir)
@@ -906,6 +1010,9 @@ def run_test_evaluation(
             output_dir=output_dir,
             threshold=threshold,
             top_k=5,
+            num_modalities=num_modalities,
+            slice_window=slice_window,
+            modality_index=modality_index,
         )
 
     summary = summary_rows[0]
